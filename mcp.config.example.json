@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "ac-mcp": {
+      "command": "C:/Users/maxim/AppData/Local/Programs/Python/Python312/python.exe",
+      "args": ["-m", "ac_mcp"],
+      "env": {
+        "AC_SETUP_ROOT": "C:/ruta/a/tus/setups",
+        "AC_SESSION_LOG_ROOT": "C:/ruta/a/tus/session_logs",
+        "AC_LLM_PROVIDER": "github_models",
+        "AC_LLM_BASE_URL": "https://models.github.ai/inference",
+        "AC_LLM_MODEL": "openai/gpt-4.1",
+        "AC_LLM_API_KEY": "REEMPLAZAR_CON_PAT_CON_SCOPE_MODELS"
+      }
+    }
+  }
+}

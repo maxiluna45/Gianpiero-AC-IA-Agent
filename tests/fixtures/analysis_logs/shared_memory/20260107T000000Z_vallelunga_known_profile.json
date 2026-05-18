@@ -1,0 +1,43 @@
+{
+  "session_id": "analysis_test",
+  "created_at_utc": "2026-01-01T00:00:00Z",
+  "sample_count": 2,
+  "samples": [
+    {
+      "physics": {
+        "speed_kmh": 146.0,
+        "brake": 0.32,
+        "gas": 0.58,
+        "steer_angle": 0.12,
+        "number_of_tyres_out": 1
+      },
+      "graphics": {
+        "normalized_car_position": 0.06,
+        "current_sector_index": 0,
+        "completed_laps": 2
+      },
+      "static": {
+        "car_model": "tatuusfa1",
+        "track": "ks_vallelunga"
+      }
+    },
+    {
+      "physics": {
+        "speed_kmh": 78.0,
+        "brake": 0.74,
+        "gas": 0.2,
+        "steer_angle": 0.26,
+        "number_of_tyres_out": 2
+      },
+      "graphics": {
+        "normalized_car_position": 0.58,
+        "current_sector_index": 1,
+        "completed_laps": 2
+      },
+      "static": {
+        "car_model": "tatuusfa1",
+        "track": "ks_vallelunga"
+      }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "corners": [
+    {
+      "name": "T1",
+      "start_pct": 5.0,
+      "end_pct": 22.0
+    },
+    {
+      "name": "T2",
+      "start_pct": 28.0,
+      "end_pct": 45.0
+    }
+  ]
+}
