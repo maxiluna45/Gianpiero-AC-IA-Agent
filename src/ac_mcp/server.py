@@ -21,6 +21,7 @@ from ac_mcp.setup_io import read_setup as io_read_setup
 from ac_mcp.telemetry_analysis import analyze_shared_memory_corner_limits as analyze_corner_limits_map
 from ac_mcp.telemetry_analysis import analyze_shared_memory_track_map
 from ac_mcp.telemetry_analysis import coach_shared_memory_corner_limits as coach_corner_limits
+from ac_mcp.telemetry_analysis import compare_shared_memory_stints as compare_shm_stints
 from ac_mcp.telemetry import list_session_context, record_session_context
 from ac_mcp.telemetry_shared_memory import (
     capture_shared_memory_snapshot as shm_capture_snapshot,
@@ -257,6 +258,21 @@ def coach_shared_memory_corner_limits(
     top_n: int = 5,
 ) -> dict[str, Any]:
     return coach_corner_limits(path=path, bins=bins, top_n=top_n)
+
+
+@mcp.tool()
+def compare_shared_memory_stints(
+    base_path: str,
+    candidate_path: str,
+    bins: int = 120,
+    objective: str = "lap_time",
+) -> dict[str, Any]:
+    return compare_shm_stints(
+        base_path=base_path,
+        candidate_path=candidate_path,
+        bins=bins,
+        objective=objective,
+    )
 
 
 @mcp.tool()

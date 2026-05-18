@@ -11,6 +11,7 @@ Te permite trabajar tus setups desde lenguaje natural, con un flujo seguro (simu
 - Comparar dos setups para entender exactamente que cambio.
 - Registrar sesiones para iterar con contexto real.
 - Analizar limites de pista por curva y recibir coaching accionable.
+- Comparar stint A vs B con delta por sector y por curva, segun objetivo.
 
 ## Para quien esta pensado
 
@@ -85,6 +86,7 @@ Piensalo como un ciclo corto de pista:
 - "Primero simulalo, no escribas nada."
 - "Ahora aplicalo como nueva version y comparalo con el anterior."
 - "Analiza mi stint y dame coaching por curva."
+- "Compara mi stint base con el nuevo y optimiza sector 2."
 
 ## Modo seguro (muy importante)
 
@@ -104,13 +106,21 @@ Si usas shared memory de AC, puedes:
 - analizar trazado por porcentaje de vuelta
 - detectar exceso de limites por curva
 - recibir coaching priorizado (entrada, apice, salida)
+- comparar dos stints/laps (A vs B) con objetivo cuantitativo
 
 Flujo corto sugerido:
 
 1. Captura stint.
 2. Corre analisis por curva.
 3. Genera coaching.
-4. Ajusta setup y vuelve a pista.
+4. Compara base vs candidato por objetivo (vuelta, sector o salida lenta).
+5. Ajusta setup y vuelve a pista.
+
+Objetivos soportados en comparacion A/B:
+
+- lap_time (mejorar tiempo total)
+- sector_1 / sector_2 / sector_3 (atacar sector puntual)
+- slow_corner_exit (mejorar salida de curvas lentas)
 
 ## Funcionalidades principales
 
@@ -143,6 +153,7 @@ Shared memory:
 - analyze_shared_memory_track
 - analyze_shared_memory_corner_limits
 - coach_shared_memory_corner_limits
+- compare_shared_memory_stints
 - list_shared_memory_sessions
 
 Referencias externas:

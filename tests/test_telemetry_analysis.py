@@ -8,6 +8,7 @@ from pathlib import Path
 from ac_mcp.telemetry_analysis import analyze_shared_memory_corner_limits
 from ac_mcp.telemetry_analysis import analyze_shared_memory_track_map
 from ac_mcp.telemetry_analysis import coach_shared_memory_corner_limits
+from ac_mcp.telemetry_analysis import compare_shared_memory_stints
 
 
 class TelemetryAnalysisTests(unittest.TestCase):
@@ -348,6 +349,152 @@ class TelemetryAnalysisTests(unittest.TestCase):
         names = {str(corner.get("name", "")) for corner in result["corners"]}
         self.assertIn("Cimini 1", names)
         self.assertIn("Tornantino", names)
+
+    def test_compare_shared_memory_stints_sector_and_corner_deltas(self) -> None:
+        os.environ.pop("AC_CONTENT_ROOT", None)
+
+        base_samples = [
+            {
+                "physics": {
+                    "speed_kmh": 92.0,
+                    "brake": 0.72,
+                    "gas": 0.35,
+                    "steer_angle": 0.24,
+                    "number_of_tyres_out": 2,
+                    "wheel_slip": [0.13, 0.12, 0.10, 0.11],
+                },
+                "graphics": {
+                    "normalized_car_position": 0.08,
+                    "current_sector_index": 0,
+                    "last_sector_time": 38000,
+                    "i_best_time": 130000,
+                    "i_last_time": 132000,
+                    "completed_laps": 4,
+                },
+                "static": {"car_model": "tatuusfa1", "track": "rt_autodrom_most"},
+            },
+            {
+                "physics": {
+                    "speed_kmh": 82.0,
+                    "brake": 0.78,
+                    "gas": 0.28,
+                    "steer_angle": 0.28,
+                    "number_of_tyres_out": 3,
+                    "wheel_slip": [0.15, 0.13, 0.12, 0.13],
+                },
+                "graphics": {
+                    "normalized_car_position": 0.32,
+                    "current_sector_index": 1,
+                    "last_sector_time": 42000,
+                    "i_best_time": 130000,
+                    "i_last_time": 132000,
+                    "completed_laps": 4,
+                },
+                "static": {"car_model": "tatuusfa1", "track": "rt_autodrom_most"},
+            },
+            {
+                "physics": {
+                    "speed_kmh": 101.0,
+                    "brake": 0.24,
+                    "gas": 0.52,
+                    "steer_angle": 0.15,
+                    "number_of_tyres_out": 1,
+                    "wheel_slip": [0.10, 0.09, 0.08, 0.09],
+                },
+                "graphics": {
+                    "normalized_car_position": 0.75,
+                    "current_sector_index": 2,
+                    "last_sector_time": 50000,
+                    "i_best_time": 130000,
+                    "i_last_time": 132000,
+                    "completed_laps": 4,
+                },
+                "static": {"car_model": "tatuusfa1", "track": "rt_autodrom_most"},
+            },
+        ]
+
+        candidate_samples = [
+            {
+                "physics": {
+                    "speed_kmh": 94.0,
+                    "brake": 0.70,
+                    "gas": 0.38,
+                    "steer_angle": 0.23,
+                    "number_of_tyres_out": 1,
+                    "wheel_slip": [0.11, 0.10, 0.09, 0.10],
+                },
+                "graphics": {
+                    "normalized_car_position": 0.08,
+                    "current_sector_index": 0,
+                    "last_sector_time": 37800,
+                    "i_best_time": 125000,
+                    "i_last_time": 127000,
+                    "completed_laps": 4,
+                },
+                "static": {"car_model": "tatuusfa1", "track": "rt_autodrom_most"},
+            },
+            {
+                "physics": {
+                    "speed_kmh": 90.0,
+                    "brake": 0.66,
+                    "gas": 0.40,
+                    "steer_angle": 0.22,
+                    "number_of_tyres_out": 1,
+                    "wheel_slip": [0.10, 0.09, 0.08, 0.09],
+                },
+                "graphics": {
+                    "normalized_car_position": 0.32,
+                    "current_sector_index": 1,
+                    "last_sector_time": 40500,
+                    "i_best_time": 125000,
+                    "i_last_time": 127000,
+                    "completed_laps": 4,
+                },
+                "static": {"car_model": "tatuusfa1", "track": "rt_autodrom_most"},
+            },
+            {
+                "physics": {
+                    "speed_kmh": 103.0,
+                    "brake": 0.22,
+                    "gas": 0.56,
+                    "steer_angle": 0.14,
+                    "number_of_tyres_out": 1,
+                    "wheel_slip": [0.09, 0.08, 0.07, 0.08],
+                },
+                "graphics": {
+                    "normalized_car_position": 0.75,
+                    "current_sector_index": 2,
+                    "last_sector_time": 49900,
+                    "i_best_time": 125000,
+                    "i_last_time": 127000,
+                    "completed_laps": 4,
+                },
+                "static": {"car_model": "tatuusfa1", "track": "rt_autodrom_most"},
+            },
+        ]
+
+        base_log = self._write_log("20260108T000000Z_base_compare.json", base_samples)
+        candidate_log = self._write_log("20260108T000500Z_candidate_compare.json", candidate_samples)
+
+        result = compare_shared_memory_stints(
+            base_path=str(base_log),
+            candidate_path=str(candidate_log),
+            bins=120,
+            objective="sector_2",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["track"], "rt_autodrom_most")
+        self.assertEqual(result["objective"]["objective"], "sector_2")
+        self.assertEqual(result["objective"]["winner"], "candidate")
+
+        sector_2 = next((item for item in result["sector_deltas"] if int(item["sector_number"]) == 2), None)
+        self.assertIsNotNone(sector_2)
+        assert sector_2 is not None
+        self.assertLess(int(sector_2["delta_time_ms"]), 0)
+
+        self.assertGreater(len(result["corner_deltas"]), 0)
+        self.assertTrue(any(float(item["delta_over_limit_pct"]) < 0 for item in result["corner_deltas"]))
 
 
 if __name__ == "__main__":

@@ -1139,3 +1139,429 @@ def coach_shared_memory_corner_limits(path: str = "", bins: int = 120, top_n: in
         "high_risk_corners": analysis.get("high_risk_corners", []),
         "underused_corners": analysis.get("underused_corners", []),
     }
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+
+    ordered = sorted(values)
+    size = len(ordered)
+    mid = size // 2
+    if size % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _summarize_sectors(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[int, dict[str, Any]] = {}
+
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+
+        graphics = sample.get("graphics", {})
+        physics = sample.get("physics", {})
+        sector_index = _safe_int(graphics.get("current_sector_index", -1))
+        if sector_index < 0:
+            continue
+
+        bucket = buckets.setdefault(
+            sector_index,
+            {
+                "count": 0,
+                "sum_speed": 0.0,
+                "sum_brake": 0.0,
+                "sum_gas": 0.0,
+                "sum_slip": 0.0,
+                "times_ms": [],
+            },
+        )
+
+        speed = _safe_float(physics.get("speed_kmh", 0.0))
+        brake = _safe_float(physics.get("brake", 0.0))
+        gas = _safe_float(physics.get("gas", 0.0))
+        slip = _safe_sequence_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
+        sector_time_ms = _safe_int(graphics.get("last_sector_time", 0))
+
+        bucket["count"] += 1
+        bucket["sum_speed"] += speed
+        bucket["sum_brake"] += brake
+        bucket["sum_gas"] += gas
+        bucket["sum_slip"] += slip
+        if sector_time_ms > 0:
+            bucket["times_ms"].append(float(sector_time_ms))
+
+    sectors: list[dict[str, Any]] = []
+    for sector_index in sorted(buckets.keys()):
+        data = buckets[sector_index]
+        count = max(1, int(data["count"]))
+        avg_speed = data["sum_speed"] / count
+        avg_brake = data["sum_brake"] / count
+        avg_gas = data["sum_gas"] / count
+        avg_slip = data["sum_slip"] / count
+
+        sector_time = _median([_safe_float(item) for item in data["times_ms"]])
+        pace_index = avg_speed - (avg_brake * 95.0) + (avg_gas * 18.0) - (avg_slip * 45.0)
+
+        sectors.append(
+            {
+                "sector_index": sector_index,
+                "sector_number": sector_index + 1,
+                "sample_count": count,
+                "avg_speed_kmh": round(avg_speed, 3),
+                "avg_brake": round(avg_brake, 4),
+                "avg_gas": round(avg_gas, 4),
+                "avg_wheel_slip": round(avg_slip, 5),
+                "sector_time_ms": int(round(sector_time)) if sector_time is not None else None,
+                "pace_index": round(pace_index, 3),
+            }
+        )
+
+    return sectors
+
+
+def _estimate_lap_time_ms(samples: list[dict[str, Any]], sector_summary: list[dict[str, Any]]) -> tuple[int | None, str]:
+    best_times: list[float] = []
+    last_times: list[float] = []
+
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        graphics = sample.get("graphics", {})
+
+        best_ms = _safe_int(graphics.get("i_best_time", 0))
+        last_ms = _safe_int(graphics.get("i_last_time", 0))
+        if best_ms > 0:
+            best_times.append(float(best_ms))
+        if last_ms > 0:
+            last_times.append(float(last_ms))
+
+    best_median = _median(best_times)
+    if best_median is not None:
+        return int(round(best_median)), "i_best_time_median"
+
+    last_median = _median(last_times)
+    if last_median is not None:
+        return int(round(last_median)), "i_last_time_median"
+
+    sector_times = [
+        _safe_int(sector.get("sector_time_ms", 0))
+        for sector in sector_summary
+        if _safe_int(sector.get("sector_time_ms", 0)) > 0
+    ]
+    if len(sector_times) >= 3:
+        return int(sum(sector_times[:3])), "sum_sector_times"
+
+    return None, "unavailable"
+
+
+def _evaluate_objective(
+    objective: str,
+    base_lap_time_ms: int | None,
+    candidate_lap_time_ms: int | None,
+    base_sectors: dict[int, dict[str, Any]],
+    candidate_sectors: dict[int, dict[str, Any]],
+    base_corners: dict[str, dict[str, Any]],
+    candidate_corners: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    normalized = str(objective or "lap_time").strip().lower()
+
+    def _winner(delta: float, lower_is_better: bool) -> str:
+        if abs(delta) < 1e-9:
+            return "tie"
+        if lower_is_better:
+            return "candidate" if delta < 0.0 else "base"
+        return "candidate" if delta > 0.0 else "base"
+
+    if normalized in {"lap_time", "lap", "overall"}:
+        if base_lap_time_ms is not None and candidate_lap_time_ms is not None:
+            delta = float(candidate_lap_time_ms - base_lap_time_ms)
+            return {
+                "objective": "lap_time",
+                "metric": "lap_time_ms",
+                "base_value": base_lap_time_ms,
+                "candidate_value": candidate_lap_time_ms,
+                "delta": round(delta, 3),
+                "lower_is_better": True,
+                "winner": _winner(delta, lower_is_better=True),
+                "source": "timing",
+            }
+
+    if normalized.startswith("sector_"):
+        try:
+            sector_number = int(normalized.split("_", maxsplit=1)[1])
+        except (TypeError, ValueError, IndexError):
+            sector_number = 0
+
+        sector_index = sector_number - 1
+        base_sector = base_sectors.get(sector_index, {})
+        candidate_sector = candidate_sectors.get(sector_index, {})
+        base_time = base_sector.get("sector_time_ms")
+        candidate_time = candidate_sector.get("sector_time_ms")
+
+        if base_time is not None and candidate_time is not None:
+            delta = float(candidate_time - base_time)
+            return {
+                "objective": f"sector_{sector_number}",
+                "metric": "sector_time_ms",
+                "base_value": int(base_time),
+                "candidate_value": int(candidate_time),
+                "delta": round(delta, 3),
+                "lower_is_better": True,
+                "winner": _winner(delta, lower_is_better=True),
+                "source": "timing",
+            }
+
+        base_pace = _safe_float(base_sector.get("pace_index", 0.0))
+        candidate_pace = _safe_float(candidate_sector.get("pace_index", 0.0))
+        delta = candidate_pace - base_pace
+        return {
+            "objective": f"sector_{max(1, sector_number)}",
+            "metric": "pace_index",
+            "base_value": round(base_pace, 3),
+            "candidate_value": round(candidate_pace, 3),
+            "delta": round(delta, 3),
+            "lower_is_better": False,
+            "winner": _winner(delta, lower_is_better=False),
+            "source": "proxy",
+        }
+
+    if normalized in {"slow_corner_exit", "slow_exit"}:
+        names = sorted(set(base_corners.keys()) | set(candidate_corners.keys()))
+        base_scores: list[float] = []
+        candidate_scores: list[float] = []
+
+        for name in names:
+            base_corner = base_corners.get(name, {})
+            candidate_corner = candidate_corners.get(name, {})
+
+            base_speed = _safe_float(base_corner.get("avg_speed_kmh", 0.0))
+            candidate_speed = _safe_float(candidate_corner.get("avg_speed_kmh", 0.0))
+            if min(base_speed, candidate_speed) > 120.0:
+                continue
+
+            base_score = (
+                (_safe_float(base_corner.get("avg_gas", 0.0)) * 40.0)
+                + (base_speed * 0.60)
+                - (_safe_float(base_corner.get("over_limit_pct", 0.0)) * 0.50)
+                - (_safe_float(base_corner.get("avg_wheel_slip", 0.0)) * 35.0)
+            )
+            candidate_score = (
+                (_safe_float(candidate_corner.get("avg_gas", 0.0)) * 40.0)
+                + (candidate_speed * 0.60)
+                - (_safe_float(candidate_corner.get("over_limit_pct", 0.0)) * 0.50)
+                - (_safe_float(candidate_corner.get("avg_wheel_slip", 0.0)) * 35.0)
+            )
+            base_scores.append(base_score)
+            candidate_scores.append(candidate_score)
+
+        base_value = _safe_float(_median(base_scores) or 0.0)
+        candidate_value = _safe_float(_median(candidate_scores) or 0.0)
+        delta = candidate_value - base_value
+        return {
+            "objective": "slow_corner_exit",
+            "metric": "exit_quality_score",
+            "base_value": round(base_value, 3),
+            "candidate_value": round(candidate_value, 3),
+            "delta": round(delta, 3),
+            "lower_is_better": False,
+            "winner": _winner(delta, lower_is_better=False),
+            "source": "proxy",
+        }
+
+    return _evaluate_objective(
+        objective="lap_time",
+        base_lap_time_ms=base_lap_time_ms,
+        candidate_lap_time_ms=candidate_lap_time_ms,
+        base_sectors=base_sectors,
+        candidate_sectors=candidate_sectors,
+        base_corners=base_corners,
+        candidate_corners=candidate_corners,
+    )
+
+
+def compare_shared_memory_stints(
+    base_path: str,
+    candidate_path: str,
+    bins: int = 120,
+    objective: str = "lap_time",
+) -> dict[str, Any]:
+    try:
+        base_resolved, base_payload, base_samples = _load_shared_memory_payload(base_path)
+        candidate_resolved, candidate_payload, candidate_samples = _load_shared_memory_payload(candidate_path)
+    except FileNotFoundError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "base_path": base_path,
+            "candidate_path": candidate_path,
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "base_path": base_path,
+            "candidate_path": candidate_path,
+        }
+
+    base_corner_analysis = analyze_shared_memory_corner_limits(path=str(base_resolved), bins=bins)
+    if not base_corner_analysis.get("ok"):
+        return {
+            "ok": False,
+            "error": f"Base analysis failed: {base_corner_analysis.get('error', 'unknown error')}",
+            "base_path": str(base_resolved),
+            "candidate_path": str(candidate_resolved),
+        }
+
+    candidate_corner_analysis = analyze_shared_memory_corner_limits(path=str(candidate_resolved), bins=bins)
+    if not candidate_corner_analysis.get("ok"):
+        return {
+            "ok": False,
+            "error": f"Candidate analysis failed: {candidate_corner_analysis.get('error', 'unknown error')}",
+            "base_path": str(base_resolved),
+            "candidate_path": str(candidate_resolved),
+        }
+
+    base_sector_summary = _summarize_sectors(base_samples)
+    candidate_sector_summary = _summarize_sectors(candidate_samples)
+
+    base_lap_time_ms, base_lap_time_source = _estimate_lap_time_ms(base_samples, base_sector_summary)
+    candidate_lap_time_ms, candidate_lap_time_source = _estimate_lap_time_ms(candidate_samples, candidate_sector_summary)
+
+    base_sectors = {int(item.get("sector_index", -1)): item for item in base_sector_summary}
+    candidate_sectors = {int(item.get("sector_index", -1)): item for item in candidate_sector_summary}
+    sector_indices = sorted(set(base_sectors.keys()) | set(candidate_sectors.keys()))
+
+    sector_deltas: list[dict[str, Any]] = []
+    for sector_index in sector_indices:
+        base_sector = base_sectors.get(sector_index, {})
+        candidate_sector = candidate_sectors.get(sector_index, {})
+        base_time = base_sector.get("sector_time_ms")
+        candidate_time = candidate_sector.get("sector_time_ms")
+
+        time_delta = None
+        if base_time is not None and candidate_time is not None:
+            time_delta = int(candidate_time) - int(base_time)
+
+        base_pace = _safe_float(base_sector.get("pace_index", 0.0))
+        candidate_pace = _safe_float(candidate_sector.get("pace_index", 0.0))
+        pace_delta = candidate_pace - base_pace
+
+        if time_delta is not None:
+            status = "improved" if time_delta < 0 else "worse" if time_delta > 0 else "equal"
+        else:
+            status = "improved" if pace_delta > 0 else "worse" if pace_delta < 0 else "equal"
+
+        sector_deltas.append(
+            {
+                "sector_index": sector_index,
+                "sector_number": sector_index + 1,
+                "base_sector_time_ms": base_time,
+                "candidate_sector_time_ms": candidate_time,
+                "delta_time_ms": time_delta,
+                "base_pace_index": round(base_pace, 3),
+                "candidate_pace_index": round(candidate_pace, 3),
+                "delta_pace_index": round(pace_delta, 3),
+                "status": status,
+            }
+        )
+
+    base_corner_rows = base_corner_analysis.get("corners", [])
+    candidate_corner_rows = candidate_corner_analysis.get("corners", [])
+    if not isinstance(base_corner_rows, list):
+        base_corner_rows = []
+    if not isinstance(candidate_corner_rows, list):
+        candidate_corner_rows = []
+
+    base_corners = {str(item.get("name", "unknown")): item for item in base_corner_rows}
+    candidate_corners = {str(item.get("name", "unknown")): item for item in candidate_corner_rows}
+
+    corner_deltas: list[dict[str, Any]] = []
+    for name in sorted(set(base_corners.keys()) | set(candidate_corners.keys())):
+        base_corner = base_corners.get(name, {})
+        candidate_corner = candidate_corners.get(name, {})
+
+        base_impact = _corner_impact_score(base_corner) if base_corner else 0.0
+        candidate_impact = _corner_impact_score(candidate_corner) if candidate_corner else 0.0
+        impact_delta = candidate_impact - base_impact
+
+        corner_deltas.append(
+            {
+                "corner": name,
+                "base_sample_count": _safe_int(base_corner.get("sample_count", 0)),
+                "candidate_sample_count": _safe_int(candidate_corner.get("sample_count", 0)),
+                "delta_avg_speed_kmh": round(
+                    _safe_float(candidate_corner.get("avg_speed_kmh", 0.0))
+                    - _safe_float(base_corner.get("avg_speed_kmh", 0.0)),
+                    3,
+                ),
+                "delta_over_limit_pct": round(
+                    _safe_float(candidate_corner.get("over_limit_pct", 0.0))
+                    - _safe_float(base_corner.get("over_limit_pct", 0.0)),
+                    3,
+                ),
+                "delta_severe_over_limit_pct": round(
+                    _safe_float(candidate_corner.get("severe_over_limit_pct", 0.0))
+                    - _safe_float(base_corner.get("severe_over_limit_pct", 0.0)),
+                    3,
+                ),
+                "delta_avg_gas": round(
+                    _safe_float(candidate_corner.get("avg_gas", 0.0))
+                    - _safe_float(base_corner.get("avg_gas", 0.0)),
+                    4,
+                ),
+                "delta_avg_wheel_slip": round(
+                    _safe_float(candidate_corner.get("avg_wheel_slip", 0.0))
+                    - _safe_float(base_corner.get("avg_wheel_slip", 0.0)),
+                    5,
+                ),
+                "base_impact_score": round(base_impact, 3),
+                "candidate_impact_score": round(candidate_impact, 3),
+                "delta_impact_score": round(impact_delta, 3),
+                "status": "improved" if impact_delta < 0 else "worse" if impact_delta > 0 else "equal",
+            }
+        )
+
+    corner_deltas_sorted = sorted(corner_deltas, key=lambda item: abs(_safe_float(item.get("delta_impact_score", 0.0))), reverse=True)
+    improved_corners = [item for item in corner_deltas_sorted if item.get("status") == "improved"][:5]
+    regressed_corners = [item for item in corner_deltas_sorted if item.get("status") == "worse"][:5]
+
+    objective_result = _evaluate_objective(
+        objective=objective,
+        base_lap_time_ms=base_lap_time_ms,
+        candidate_lap_time_ms=candidate_lap_time_ms,
+        base_sectors=base_sectors,
+        candidate_sectors=candidate_sectors,
+        base_corners=base_corners,
+        candidate_corners=candidate_corners,
+    )
+
+    track = str(base_corner_analysis.get("track", "") or candidate_corner_analysis.get("track", ""))
+    car_model = str(base_corner_analysis.get("car_model", "") or candidate_corner_analysis.get("car_model", ""))
+
+    return {
+        "ok": True,
+        "base_path": str(base_resolved),
+        "candidate_path": str(candidate_resolved),
+        "base_session_id": str(base_payload.get("session_id", "")),
+        "candidate_session_id": str(candidate_payload.get("session_id", "")),
+        "track": track,
+        "car_model": car_model,
+        "objective": objective_result,
+        "lap_time": {
+            "base_ms": base_lap_time_ms,
+            "candidate_ms": candidate_lap_time_ms,
+            "delta_ms": (candidate_lap_time_ms - base_lap_time_ms)
+            if base_lap_time_ms is not None and candidate_lap_time_ms is not None
+            else None,
+            "base_source": base_lap_time_source,
+            "candidate_source": candidate_lap_time_source,
+        },
+        "sector_deltas": sector_deltas,
+        "corner_deltas": corner_deltas_sorted,
+        "top_improved_corners": improved_corners,
+        "top_regressed_corners": regressed_corners,
+        "base_summary": base_corner_analysis.get("summary", {}),
+        "candidate_summary": candidate_corner_analysis.get("summary", {}),
+    }
