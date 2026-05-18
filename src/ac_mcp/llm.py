@@ -23,6 +23,7 @@ class LlmChange(BaseModel):
     delta: float | None = None
     new_value: float | int | str | None = None
     reason: str = ""
+    confidence: float | None = None
 
 
 class LlmPayload(BaseModel):
@@ -64,6 +65,67 @@ def _extract_json(content: str) -> dict[str, Any]:
     raise ValueError("LLM did not return parseable JSON object")
 
 
+def _tokenize(text: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", text.upper())
+
+
+def _target_name(section: str, key: str) -> str:
+    return section if key.upper() == "VALUE" else key
+
+
+def _clamp_confidence(value: float) -> float:
+    return max(0.05, min(1.0, float(value)))
+
+
+def _resolve_target(
+    setup: dict[str, dict[str, str]],
+    section: str,
+    key: str,
+) -> tuple[str, str] | None:
+    if section in setup and key in setup[section]:
+        return section, key
+
+    section_token = _tokenize(section)
+    key_token = _tokenize(key)
+
+    if section in setup and "VALUE" in setup[section] and (not key_token or key_token == "VALUE"):
+        return section, "VALUE"
+
+    candidates: list[tuple[int, str, str]] = []
+    for sec_name, values in setup.items():
+        sec_token = _tokenize(sec_name)
+        for key_name in values:
+            key_name_token = _tokenize(key_name)
+            target_token = _tokenize(_target_name(sec_name, key_name))
+            score = 0
+
+            if section_token and section_token == sec_token and key_token and key_token == key_name_token:
+                score = 100
+            elif key_token and key_token in {key_name_token, target_token}:
+                score = 92
+            elif section_token and section_token in {sec_token, target_token}:
+                score = 88
+            elif key_token and key_token in target_token:
+                score = 82
+            elif section_token and section_token in target_token:
+                score = 80
+            elif key_token and key_token in key_name_token:
+                score = 76
+
+            if score > 0:
+                candidates.append((score, sec_name, key_name))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best = candidates[0]
+    if best[0] < 76:
+        return None
+
+    return best[1], best[2]
+
+
 def _is_number(value: str) -> bool:
     try:
         float(value)
@@ -84,12 +146,14 @@ def _normalize_llm_changes(
 
         if not section or not key:
             continue
-        if section not in setup:
-            continue
-        if key not in setup[section]:
+
+        target = _resolve_target(setup, section, key)
+        if target is None:
             continue
 
-        current = setup[section][key]
+        resolved_section, resolved_key = target
+
+        current = setup[resolved_section][resolved_key]
         if not _is_number(current):
             continue
         current_num = float(current)
@@ -104,12 +168,21 @@ def _normalize_llm_changes(
         if delta is None:
             continue
 
+        confidence = 0.68
+        if item.confidence is not None:
+            try:
+                confidence = _clamp_confidence(float(item.confidence))
+            except (TypeError, ValueError):
+                confidence = 0.68
+
         normalized.append(
             {
-                "section": section,
-                "key": key,
+                "section": resolved_section,
+                "key": resolved_key,
                 "delta": round(float(delta), 3),
                 "reason": item.reason.strip() or "LLM suggestion.",
+                "confidence": round(confidence, 3),
+                "source": "llm",
             }
         )
 
@@ -158,18 +231,27 @@ def llm_suggest_changes(
     for section, values in setup.items():
         for key, raw in values.items():
             if _is_number(raw):
-                numeric_targets.append({"section": section, "key": key, "value": raw})
+                numeric_targets.append(
+                    {
+                        "section": section,
+                        "key": key,
+                        "target": _target_name(section, key),
+                        "value": raw,
+                    }
+                )
 
     prompt = {
         "task": "Suggest safe setup deltas for Assetto Corsa.",
-        "constraints": [
-            "Only use keys that exist in numeric_targets.",
-            "Return at most 8 changes.",
-            "Prefer conservative deltas.",
+        "requirements": [
             "Output strict JSON object only.",
+            "Use available setup keys and map to the closest valid target when needed.",
+            "Prioritize lap-time impact while preserving drivability.",
+            "You may return as many changes as needed for the objective.",
+            "confidence must be between 0 and 1 for each change.",
         ],
         "symptoms": symptoms,
         "track_conditions": track_conditions,
+        "setup_snapshot": setup,
         "numeric_targets": numeric_targets,
         "heuristic_suggestions": heuristic_suggestions,
         "output_schema": {
@@ -181,6 +263,7 @@ def llm_suggest_changes(
                     "delta": "number optional",
                     "new_value": "number optional",
                     "reason": "string",
+                    "confidence": "number between 0 and 1",
                 }
             ],
         },

@@ -123,6 +123,34 @@ def _now_utc_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _avg(values: Any) -> float:
+    if not isinstance(values, (list, tuple)):
+        return 0.0
+    nums: list[float] = []
+    for value in values:
+        try:
+            nums.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return 0.0
+    return sum(nums) / len(nums)
+
+
+def _max(values: Any) -> float:
+    if not isinstance(values, (list, tuple)):
+        return 0.0
+    nums: list[float] = []
+    for value in values:
+        try:
+            nums.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return 0.0
+    return max(nums)
+
+
 def _public_capture_view(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "capture_id": str(job.get("capture_id", "")),
@@ -154,6 +182,7 @@ def capture_shared_memory_snapshot() -> dict[str, Any]:
     return {
         "timestamp_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "physics": {
+            "packet_id": int(physics.packet_id),
             "speed_kmh": round(float(physics.speed_kmh), 3),
             "rpms": int(physics.rpms),
             "gear": int(physics.gear),
@@ -161,28 +190,77 @@ def capture_shared_memory_snapshot() -> dict[str, Any]:
             "brake": round(float(physics.brake), 4),
             "fuel": round(float(physics.fuel), 3),
             "steer_angle": round(float(physics.steer_angle), 4),
+            "velocity_xyz": [round(float(v), 4) for v in physics.velocity],
+            "acc_g_xyz": [round(float(v), 4) for v in physics.acc_g],
+            "wheel_slip": [round(float(v), 4) for v in physics.wheel_slip],
+            "wheel_load": [round(float(v), 3) for v in physics.wheel_load],
+            "wheel_pressure": [round(float(v), 3) for v in physics.wheel_pressure],
+            "wheel_angular_speed": [round(float(v), 4) for v in physics.wheel_angular_speed],
+            "tyre_wear": [round(float(v), 4) for v in physics.tyre_wear],
+            "tyre_dirty_level": [round(float(v), 4) for v in physics.tyre_dirty_level],
             "number_of_tyres_out": int(physics.number_of_tyres_out),
+            "camber_rad": [round(float(v), 6) for v in physics.camber_rad],
+            "suspension_travel": [round(float(v), 5) for v in physics.suspension_travel],
+            "drs": round(float(physics.drs), 4),
+            "tc": round(float(physics.tc), 4),
+            "abs": round(float(physics.abs), 4),
+            "pit_limiter_on": bool(physics.pit_limiter_on),
+            "kers_charge": round(float(physics.kers_charge), 4),
+            "kers_input": round(float(physics.kers_input), 4),
+            "auto_shifter_on": bool(physics.auto_shifter_on),
+            "ride_height": [round(float(v), 5) for v in physics.ride_height],
+            "turbo_boost": round(float(physics.turbo_boost), 4),
+            "ballast": round(float(physics.ballast), 3),
+            "air_density": round(float(physics.air_density), 5),
+            "heading": round(float(physics.heading), 5),
+            "pitch": round(float(physics.pitch), 5),
+            "roll": round(float(physics.roll), 5),
+            "cg_height": round(float(physics.cg_height), 5),
+            "car_damage": [round(float(v), 4) for v in physics.car_damage],
             "air_temp_c": round(float(physics.air_temp), 3),
             "road_temp_c": round(float(physics.road_temp), 3),
             "tyre_core_temp_c": [round(float(v), 3) for v in physics.tyre_core_temp],
             "tyre_pressure": [round(float(v), 3) for v in physics.wheel_pressure],
+            "avg_wheel_slip": round(_avg(physics.wheel_slip), 5),
+            "max_wheel_slip": round(_max(physics.wheel_slip), 5),
+            "avg_suspension_travel": round(_avg(physics.suspension_travel), 6),
+            "avg_tyre_temp_c": round(_avg(physics.tyre_core_temp), 4),
+            "avg_tyre_wear": round(_avg(physics.tyre_wear), 5),
         },
         "graphics": {
+            "packet_id": int(graphics.packet_id),
             "status": int(graphics.status),
             "session": int(graphics.session),
             "current_time": _clean_wchar(graphics.current_time),
             "last_time": _clean_wchar(graphics.last_time),
             "best_time": _clean_wchar(graphics.best_time),
+            "split": _clean_wchar(graphics.split),
             "completed_laps": int(graphics.completed_laps),
             "position": int(graphics.position),
+            "i_current_time": int(graphics.i_current_time),
+            "i_last_time": int(graphics.i_last_time),
+            "i_best_time": int(graphics.i_best_time),
             "current_sector_index": int(graphics.current_sector_index),
+            "last_sector_time": int(graphics.last_sector_time),
+            "number_of_laps": int(graphics.number_of_laps),
+            "tyre_compound": _clean_wchar(graphics.tyre_compound),
+            "distance_traveled": round(float(graphics.distance_traveled), 3),
+            "replay_time_multiplier": round(float(graphics.replay_time_multiplier), 3),
             "normalized_car_position": round(float(graphics.normalized_car_position), 6),
             "car_coordinates": [round(float(v), 3) for v in graphics.car_coordinates],
             "session_time_left": round(float(graphics.session_time_left), 3),
             "is_in_pit": bool(graphics.is_in_pit),
+            "penalty_time": round(float(graphics.penalty_time), 4),
+            "flag": int(graphics.flag),
+            "ideal_line_on": bool(graphics.ideal_line_on),
+            "is_in_pit_lane": bool(graphics.is_in_pit_lane),
             "surface_grip": round(float(graphics.surface_grip), 4),
         },
         "static": {
+            "sm_version": _clean_wchar(static.sm_version),
+            "ac_version": _clean_wchar(static.ac_version),
+            "number_of_sessions": int(static.number_of_sessions),
+            "num_cars": int(static.num_cars),
             "car_model": _clean_wchar(static.car_model),
             "track": _clean_wchar(static.track),
             "player_name": _clean_wchar(static.player_name),
@@ -207,20 +285,40 @@ def _flatten_for_csv(snapshot: dict[str, Any]) -> dict[str, Any]:
         "timestamp_utc": snapshot.get("timestamp_utc", ""),
         "car_model": static.get("car_model", ""),
         "track": static.get("track", ""),
+        "session_status": graphics.get("status", ""),
+        "session_type": graphics.get("session", ""),
         "speed_kmh": physics.get("speed_kmh", ""),
         "rpms": physics.get("rpms", ""),
         "gear": physics.get("gear", ""),
         "gas": physics.get("gas", ""),
         "brake": physics.get("brake", ""),
         "fuel": physics.get("fuel", ""),
+        "steer_angle": physics.get("steer_angle", ""),
         "number_of_tyres_out": physics.get("number_of_tyres_out", ""),
+        "pit_limiter_on": physics.get("pit_limiter_on", ""),
+        "tc": physics.get("tc", ""),
+        "abs": physics.get("abs", ""),
+        "avg_wheel_slip": physics.get("avg_wheel_slip", round(_avg(physics.get("wheel_slip", [])), 5)),
+        "max_wheel_slip": physics.get("max_wheel_slip", round(_max(physics.get("wheel_slip", [])), 5)),
+        "avg_suspension_travel": physics.get("avg_suspension_travel", round(_avg(physics.get("suspension_travel", [])), 6)),
+        "avg_tyre_temp_c": physics.get("avg_tyre_temp_c", round(_avg(physics.get("tyre_core_temp_c", [])), 4)),
+        "avg_tyre_wear": physics.get("avg_tyre_wear", round(_avg(physics.get("tyre_wear", [])), 5)),
         "air_temp_c": physics.get("air_temp_c", ""),
         "road_temp_c": physics.get("road_temp_c", ""),
         "completed_laps": graphics.get("completed_laps", ""),
         "position": graphics.get("position", ""),
+        "current_time": graphics.get("current_time", ""),
+        "last_time": graphics.get("last_time", ""),
+        "best_time": graphics.get("best_time", ""),
+        "split": graphics.get("split", ""),
+        "distance_traveled": graphics.get("distance_traveled", ""),
+        "penalty_time": graphics.get("penalty_time", ""),
+        "flag": graphics.get("flag", ""),
         "current_sector_index": graphics.get("current_sector_index", ""),
         "normalized_car_position": graphics.get("normalized_car_position", ""),
         "is_in_pit": graphics.get("is_in_pit", ""),
+        "is_in_pit_lane": graphics.get("is_in_pit_lane", ""),
+        "tyre_compound": graphics.get("tyre_compound", ""),
         "surface_grip": graphics.get("surface_grip", ""),
     }
 

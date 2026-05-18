@@ -139,6 +139,23 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+def _safe_sequence_avg(value: Any) -> float:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0.0
+        numbers = [_safe_float(item) for item in value]
+        return sum(numbers) / max(1, len(numbers))
+    return _safe_float(value)
+
+
+def _safe_sequence_max(value: Any) -> float:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0.0
+        return max(_safe_float(item) for item in value)
+    return _safe_float(value)
+
+
 def _load_corner_profile_rows(raw_rows: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_rows, list):
         return []
@@ -482,6 +499,10 @@ def _build_corner_advice(
     avg_abs_steer: float,
     avg_speed_kmh: float,
     avg_gas: float,
+    avg_wheel_slip: float,
+    avg_suspension_travel: float,
+    avg_tc_setting: float,
+    avg_abs_setting: float,
 ) -> str:
     notes: list[str] = []
 
@@ -499,6 +520,18 @@ def _build_corner_advice(
     if avg_gas >= 0.7 and over_limit_pct >= 10.0:
         notes.append("Traccion comprometida en salida: aplica gas mas progresivo para cuidar neumatico.")
 
+    if avg_wheel_slip >= 0.12:
+        notes.append("Slip alto en la curva: prioriza una salida menos agresiva y lineas mas limpias.")
+
+    if avg_suspension_travel >= 0.085:
+        notes.append("Movimiento vertical elevado: evita pianos agresivos y estabiliza transferencia de carga.")
+
+    if avg_tc_setting >= 4.5 and avg_wheel_slip >= 0.1:
+        notes.append("Aun con mucho TC hay patinaje: revisar balance mecanico/diferencial para mejorar traccion real.")
+
+    if avg_abs_setting >= 4.5 and severe_over_limit_pct >= 3.0:
+        notes.append("ABS alto con salidas de pista: puede haber entrada pasada, ajusta referencia de frenada.")
+
     if not notes:
         notes.append("Uso de limites estable en esta curva.")
     return " ".join(notes)
@@ -511,6 +544,8 @@ def _corner_impact_score(corner: dict[str, Any]) -> float:
     coverage = _safe_float(corner.get("coverage_pct", 0.0))
     steer = _safe_float(corner.get("avg_abs_steer", 0.0))
     gas = _safe_float(corner.get("avg_gas", 0.0))
+    slip = _safe_float(corner.get("avg_wheel_slip", 0.0))
+    suspension = _safe_float(corner.get("avg_suspension_travel", 0.0))
 
     under_penalty = max(0.0, under - 82.0)
     traccion_risk = gas * over
@@ -520,7 +555,9 @@ def _corner_impact_score(corner: dict[str, Any]) -> float:
         + (under_penalty * 0.55)
         + (coverage * 0.25)
         + (steer * 12.0)
-        + (traccion_risk * 0.15),
+        + (traccion_risk * 0.15)
+        + (slip * 45.0)
+        + (suspension * 80.0),
         3,
     )
 
@@ -530,8 +567,12 @@ def _wear_risk_level(corner: dict[str, Any]) -> str:
     severe = _safe_float(corner.get("severe_over_limit_pct", 0.0))
     gas = _safe_float(corner.get("avg_gas", 0.0))
     steer = _safe_float(corner.get("avg_abs_steer", 0.0))
+    slip = _safe_float(corner.get("avg_wheel_slip", 0.0))
+    tyre_temp = _safe_float(corner.get("avg_tyre_temp_c", 0.0))
 
-    wear_load = (over * 0.8) + (severe * 2.2) + (gas * 18.0) + (steer * 28.0)
+    wear_load = (over * 0.8) + (severe * 2.2) + (gas * 18.0) + (steer * 28.0) + (slip * 30.0)
+    if tyre_temp >= 95.0:
+        wear_load += (tyre_temp - 95.0) * 0.3
     if wear_load >= 42.0:
         return "high"
     if wear_load >= 24.0:
@@ -545,6 +586,8 @@ def _build_corner_phase_actions(corner: dict[str, Any]) -> dict[str, str]:
     under = _safe_float(corner.get("under_limit_pct", 0.0))
     brake = _safe_float(corner.get("avg_brake", 0.0))
     gas = _safe_float(corner.get("avg_gas", 0.0))
+    slip = _safe_float(corner.get("avg_wheel_slip", 0.0))
+    suspension = _safe_float(corner.get("avg_suspension_travel", 0.0))
 
     entry = "Mantener punto de frenada actual y repetir referencia visual."
     apex = "Buscar apice limpio y estable sin sobrecorregir volante."
@@ -573,6 +616,13 @@ def _build_corner_phase_actions(corner: dict[str, Any]) -> dict[str, str]:
         apex = "Apuntar a apice ligeramente tardio para mejorar linea de salida."
         exit_action = "Dosificar gas en dos fases (60-70% y luego 100% con volante abierto)."
 
+    if slip >= 0.12:
+        objective = "Recuperar traccion real y reducir desgaste en salida."
+        exit_action = "Modular gas en rampa y abrir volante antes para reducir patinaje."
+
+    if suspension >= 0.085:
+        apex = "Evitar atacar piano interior agresivo para no desestabilizar el chasis en apoyo."
+
     return {
         "objective": objective,
         "entry": entry,
@@ -591,6 +641,11 @@ def _bucket_summary(index: int, bins: int, total_count: int, bucket: dict[str, f
     avg_brake = bucket["sum_brake"] / count
     avg_gas = bucket["sum_gas"] / count
     avg_steer = bucket["sum_steer"] / count
+    avg_tc = bucket["sum_tc"] / count
+    avg_abs = bucket["sum_abs"] / count
+    avg_slip = bucket["sum_slip"] / count
+    max_slip = bucket["sum_slip_max"] / count
+    avg_susp = bucket["sum_suspension"] / count
 
     distance_m = round(center_ratio * track_length_m, 1) if track_length_m > 0 else None
 
@@ -605,6 +660,11 @@ def _bucket_summary(index: int, bins: int, total_count: int, bucket: dict[str, f
         "avg_brake": round(avg_brake, 4),
         "avg_gas": round(avg_gas, 4),
         "avg_abs_steer": round(avg_steer, 4),
+        "avg_tc_setting": round(avg_tc, 4),
+        "avg_abs_setting": round(avg_abs, 4),
+        "avg_wheel_slip": round(avg_slip, 5),
+        "max_wheel_slip": round(max_slip, 5),
+        "avg_suspension_travel": round(avg_susp, 6),
         "estimated_distance_m": distance_m,
     }
 
@@ -634,7 +694,18 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
     track_length_m = _KNOWN_TRACK_LENGTH_M.get(track_key, 0.0)
 
     buckets: list[dict[str, float]] = [
-        {"count": 0.0, "sum_speed": 0.0, "sum_brake": 0.0, "sum_gas": 0.0, "sum_steer": 0.0}
+        {
+            "count": 0.0,
+            "sum_speed": 0.0,
+            "sum_brake": 0.0,
+            "sum_gas": 0.0,
+            "sum_steer": 0.0,
+            "sum_tc": 0.0,
+            "sum_abs": 0.0,
+            "sum_slip": 0.0,
+            "sum_slip_max": 0.0,
+            "sum_suspension": 0.0,
+        }
         for _ in range(bucket_count)
     ]
 
@@ -668,6 +739,13 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
         brake = _safe_float(physics.get("brake", 0.0))
         gas = _safe_float(physics.get("gas", 0.0))
         steer = abs(_safe_float(physics.get("steer_angle", 0.0)))
+        tc_setting = _safe_float(physics.get("tc", 0.0))
+        abs_setting = _safe_float(physics.get("abs", 0.0))
+        wheel_slip_avg = _safe_sequence_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
+        wheel_slip_max = _safe_sequence_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0)))
+        suspension_avg = _safe_sequence_avg(
+            physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0))
+        )
 
         bucket = buckets[bucket_index]
         bucket["count"] += 1.0
@@ -675,6 +753,11 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
         bucket["sum_brake"] += brake
         bucket["sum_gas"] += gas
         bucket["sum_steer"] += steer
+        bucket["sum_tc"] += tc_setting
+        bucket["sum_abs"] += abs_setting
+        bucket["sum_slip"] += wheel_slip_avg
+        bucket["sum_slip_max"] += wheel_slip_max
+        bucket["sum_suspension"] += suspension_avg
         mapped_count += 1
 
     if mapped_count == 0:
@@ -695,7 +778,11 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
     low_speed = sorted(profile, key=lambda row: row["avg_speed_kmh"])[:5]
     traction = sorted(
         profile,
-        key=lambda row: (row["avg_gas"] * (1.0 - min(row["avg_speed_kmh"] / 250.0, 1.0)), row["sample_count"]),
+        key=lambda row: (
+            row["avg_gas"] * (1.0 - min(row["avg_speed_kmh"] / 250.0, 1.0))
+            + (row.get("avg_wheel_slip", 0.0) * 1.8),
+            row["sample_count"],
+        ),
         reverse=True,
     )[:5]
 
@@ -766,6 +853,13 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
             "sum_brake": 0.0,
             "sum_gas": 0.0,
             "sum_steer": 0.0,
+            "sum_tc": 0.0,
+            "sum_abs": 0.0,
+            "sum_wheel_slip": 0.0,
+            "sum_wheel_slip_max": 0.0,
+            "sum_suspension_travel": 0.0,
+            "sum_tyre_temp": 0.0,
+            "sum_tyre_wear": 0.0,
             "under_limit": 0.0,
             "on_limit": 0.0,
             "over_limit": 0.0,
@@ -799,6 +893,15 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
         brake = _safe_float(physics.get("brake", 0.0))
         gas = _safe_float(physics.get("gas", 0.0))
         steer = abs(_safe_float(physics.get("steer_angle", 0.0)))
+        tc_setting = _safe_float(physics.get("tc", 0.0))
+        abs_setting = _safe_float(physics.get("abs", 0.0))
+        wheel_slip_avg = _safe_sequence_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
+        wheel_slip_max = _safe_sequence_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0)))
+        suspension_avg = _safe_sequence_avg(
+            physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0))
+        )
+        tyre_temp_avg = _safe_sequence_avg(physics.get("tyre_core_temp_c", physics.get("avg_tyre_temp_c", 0.0)))
+        tyre_wear_avg = _safe_sequence_avg(physics.get("tyre_wear", physics.get("avg_tyre_wear", 0.0)))
 
         tyres_out_raw = physics.get("number_of_tyres_out")
         if tyres_out_raw is None:
@@ -810,6 +913,13 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
         current["sum_brake"] += brake
         current["sum_gas"] += gas
         current["sum_steer"] += steer
+        current["sum_tc"] += tc_setting
+        current["sum_abs"] += abs_setting
+        current["sum_wheel_slip"] += wheel_slip_avg
+        current["sum_wheel_slip_max"] += wheel_slip_max
+        current["sum_suspension_travel"] += suspension_avg
+        current["sum_tyre_temp"] += tyre_temp_avg
+        current["sum_tyre_wear"] += tyre_wear_avg
         if tyres_out == 0:
             current["under_limit"] += 1.0
         elif tyres_out == 1:
@@ -852,6 +962,13 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
         avg_brake = float(data["sum_brake"]) / count
         avg_gas = float(data["sum_gas"]) / count
         avg_steer = float(data["sum_steer"]) / count
+        avg_tc = float(data["sum_tc"]) / count
+        avg_abs = float(data["sum_abs"]) / count
+        avg_wheel_slip = float(data["sum_wheel_slip"]) / count
+        max_wheel_slip = float(data["sum_wheel_slip_max"]) / count
+        avg_suspension_travel = float(data["sum_suspension_travel"]) / count
+        avg_tyre_temp = float(data["sum_tyre_temp"]) / count
+        avg_tyre_wear = float(data["sum_tyre_wear"]) / count
         under_limit = int(data["under_limit"])
         on_limit = int(data["on_limit"])
         over_limit = int(data["over_limit"])
@@ -873,6 +990,13 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
                 "avg_brake": round(avg_brake, 4),
                 "avg_gas": round(avg_gas, 4),
                 "avg_abs_steer": round(avg_steer, 4),
+                "avg_tc_setting": round(avg_tc, 4),
+                "avg_abs_setting": round(avg_abs, 4),
+                "avg_wheel_slip": round(avg_wheel_slip, 5),
+                "max_wheel_slip": round(max_wheel_slip, 5),
+                "avg_suspension_travel": round(avg_suspension_travel, 6),
+                "avg_tyre_temp_c": round(avg_tyre_temp, 4),
+                "avg_tyre_wear": round(avg_tyre_wear, 5),
                 "under_limit_count": under_limit,
                 "on_limit_count": on_limit,
                 "over_limit_count": over_limit,
@@ -888,13 +1012,21 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
                     avg_abs_steer=avg_steer,
                     avg_speed_kmh=avg_speed,
                     avg_gas=avg_gas,
+                    avg_wheel_slip=avg_wheel_slip,
+                    avg_suspension_travel=avg_suspension_travel,
+                    avg_tc_setting=avg_tc,
+                    avg_abs_setting=avg_abs,
                 ),
             }
         )
 
     high_risk = sorted(
         [corner for corner in corners if int(corner.get("sample_count", 0)) > 0],
-        key=lambda item: (float(item.get("over_limit_pct", 0.0)), float(item.get("severe_over_limit_pct", 0.0))),
+        key=lambda item: (
+            float(item.get("over_limit_pct", 0.0)),
+            float(item.get("severe_over_limit_pct", 0.0)),
+            float(item.get("avg_wheel_slip", 0.0)),
+        ),
         reverse=True,
     )[:5]
     underused = sorted(
@@ -976,6 +1108,10 @@ def coach_shared_memory_corner_limits(path: str = "", bins: int = 120, top_n: in
                     "avg_speed_kmh": _safe_float(corner.get("avg_speed_kmh", 0.0)),
                     "avg_brake": _safe_float(corner.get("avg_brake", 0.0)),
                     "avg_gas": _safe_float(corner.get("avg_gas", 0.0)),
+                    "avg_wheel_slip": _safe_float(corner.get("avg_wheel_slip", 0.0)),
+                    "avg_suspension_travel": _safe_float(corner.get("avg_suspension_travel", 0.0)),
+                    "avg_tc_setting": _safe_float(corner.get("avg_tc_setting", 0.0)),
+                    "avg_abs_setting": _safe_float(corner.get("avg_abs_setting", 0.0)),
                     "coverage_pct": _safe_float(corner.get("coverage_pct", 0.0)),
                 },
                 "advice": str(corner.get("advice", "")),
