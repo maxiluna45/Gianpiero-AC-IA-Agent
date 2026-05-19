@@ -28,6 +28,7 @@ from ac_mcp.telemetry_shared_memory import (
 )
 from ac_mcp.telemetry_shared_memory import get_shared_memory_stint_status as shm_get_stint_status
 from ac_mcp.telemetry_shared_memory import list_shared_memory_logs
+from ac_mcp.telemetry_shared_memory import read_shared_memory_log as shm_read_log
 from ac_mcp.telemetry_shared_memory import record_shared_memory_stint as shm_record_stint
 from ac_mcp.telemetry_shared_memory import start_shared_memory_stint as shm_start_stint
 from ac_mcp.telemetry_shared_memory import stop_shared_memory_stint as shm_stop_stint
@@ -278,6 +279,11 @@ def compare_shared_memory_stints(
 @mcp.tool()
 def list_shared_memory_sessions(limit: int = 20) -> dict[str, Any]:
     return list_shared_memory_logs(limit=limit)
+
+
+@mcp.tool()
+def read_shared_memory_session(path: str = "", max_samples: int = 0) -> dict[str, Any]:
+    return shm_read_log(path=path, max_samples=max_samples)
 
 
 @mcp.tool()

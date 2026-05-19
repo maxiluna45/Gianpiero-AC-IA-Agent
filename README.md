@@ -150,6 +150,7 @@ Shared memory:
 - start_shared_memory_capture
 - get_shared_memory_capture_status
 - stop_shared_memory_capture
+- read_shared_memory_session
 - analyze_shared_memory_track
 - analyze_shared_memory_corner_limits
 - coach_shared_memory_corner_limits

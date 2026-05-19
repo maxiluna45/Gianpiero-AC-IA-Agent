@@ -151,6 +151,17 @@ def _max(values: Any) -> float:
     return max(nums)
 
 
+def _wheel_metric(values: Any, index: int) -> float:
+    if not isinstance(values, (list, tuple)):
+        return 0.0
+    if index < 0 or index >= len(values):
+        return 0.0
+    try:
+        return float(values[index])
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _public_capture_view(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "capture_id": str(job.get("capture_id", "")),
@@ -276,6 +287,37 @@ def _shared_memory_root() -> Path:
     return root
 
 
+def _resolve_shared_memory_log_path(path: str) -> Path:
+    root = _shared_memory_root()
+
+    if path.strip():
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        if not resolved.exists() or not resolved.is_file():
+            raise FileNotFoundError(f"Shared-memory log not found: {resolved}")
+        return resolved
+
+    files = sorted(root.glob("*.json"), reverse=True)
+    if not files:
+        raise FileNotFoundError("No shared-memory logs found")
+    return files[0]
+
+
+def _load_shared_memory_log_payload(path: str) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+    resolved = _resolve_shared_memory_log_path(path)
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    samples_raw = payload.get("samples", [])
+    if not isinstance(samples_raw, list):
+        raise ValueError("No samples in shared-memory log")
+
+    samples: list[dict[str, Any]] = [item for item in samples_raw if isinstance(item, dict)]
+    if not samples:
+        raise ValueError("No samples in shared-memory log")
+    return resolved, payload, samples
+
+
 def _flatten_for_csv(snapshot: dict[str, Any]) -> dict[str, Any]:
     physics = snapshot.get("physics", {})
     graphics = snapshot.get("graphics", {})
@@ -303,6 +345,14 @@ def _flatten_for_csv(snapshot: dict[str, Any]) -> dict[str, Any]:
         "avg_suspension_travel": physics.get("avg_suspension_travel", round(_avg(physics.get("suspension_travel", [])), 6)),
         "avg_tyre_temp_c": physics.get("avg_tyre_temp_c", round(_avg(physics.get("tyre_core_temp_c", [])), 4)),
         "avg_tyre_wear": physics.get("avg_tyre_wear", round(_avg(physics.get("tyre_wear", [])), 5)),
+        "tyre_temp_lf_c": round(_wheel_metric(physics.get("tyre_core_temp_c", []), 0), 3),
+        "tyre_temp_rf_c": round(_wheel_metric(physics.get("tyre_core_temp_c", []), 1), 3),
+        "tyre_temp_lr_c": round(_wheel_metric(physics.get("tyre_core_temp_c", []), 2), 3),
+        "tyre_temp_rr_c": round(_wheel_metric(physics.get("tyre_core_temp_c", []), 3), 3),
+        "tyre_pressure_lf": round(_wheel_metric(physics.get("tyre_pressure", physics.get("wheel_pressure", [])), 0), 3),
+        "tyre_pressure_rf": round(_wheel_metric(physics.get("tyre_pressure", physics.get("wheel_pressure", [])), 1), 3),
+        "tyre_pressure_lr": round(_wheel_metric(physics.get("tyre_pressure", physics.get("wheel_pressure", [])), 2), 3),
+        "tyre_pressure_rr": round(_wheel_metric(physics.get("tyre_pressure", physics.get("wheel_pressure", [])), 3), 3),
         "air_temp_c": physics.get("air_temp_c", ""),
         "road_temp_c": physics.get("road_temp_c", ""),
         "completed_laps": graphics.get("completed_laps", ""),
@@ -575,4 +625,48 @@ def list_shared_memory_logs(limit: int = 20) -> dict[str, Any]:
             }
             for file_path in files
         ]
+    }
+
+
+def read_shared_memory_log(path: str = "", max_samples: int = 0) -> dict[str, Any]:
+    try:
+        resolved, payload, samples = _load_shared_memory_log_payload(path)
+    except FileNotFoundError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "path": path,
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "path": path,
+        }
+
+    limit = int(max_samples)
+    if limit > 0:
+        selected = samples[:limit]
+    else:
+        selected = samples
+
+    first_sample = selected[0] if selected else {}
+    physics = first_sample.get("physics", {}) if isinstance(first_sample, dict) else {}
+    graphics = first_sample.get("graphics", {}) if isinstance(first_sample, dict) else {}
+
+    available_physics_keys = sorted(physics.keys()) if isinstance(physics, dict) else []
+    available_graphics_keys = sorted(graphics.keys()) if isinstance(graphics, dict) else []
+
+    return {
+        "ok": True,
+        "path": str(resolved),
+        "session_id": str(payload.get("session_id", "")),
+        "total_samples": len(samples),
+        "returned_samples": len(selected),
+        "max_samples": limit,
+        "available_fields": {
+            "physics": available_physics_keys,
+            "graphics": available_graphics_keys,
+        },
+        "samples": selected,
     }
