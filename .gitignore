@@ -27,6 +27,13 @@ ENV/
 htmlcov/
 *.log
 
+# Local telemetry/replay outputs (can be very large)
+parsed_csv/
+parsed_csv_test/
+replays/
+*.acreplay
+*.ibt
+
 .vscode/
 .idea/
 *.code-workspace
