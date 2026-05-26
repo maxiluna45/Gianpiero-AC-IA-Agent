@@ -9,6 +9,8 @@ from unittest.mock import patch
 from ac_mcp.advisor import suggest_changes
 from ac_mcp.advisor import suggest_changes_heuristic
 from ac_mcp.telemetry_shared_memory import get_shared_memory_stint_status
+from ac_mcp.telemetry_shared_memory import get_telemetry_capabilities
+from ac_mcp.telemetry_shared_memory import list_supported_telemetry_simulators
 from ac_mcp.telemetry_shared_memory import persist_shared_memory_samples
 from ac_mcp.telemetry_shared_memory import read_shared_memory_log
 from ac_mcp.telemetry_shared_memory import record_shared_memory_stint
@@ -51,6 +53,7 @@ class LlmAndSharedMemoryTests(unittest.TestCase):
     def test_persist_shared_memory_samples_exports_files(self) -> None:
         samples = [
             {
+                "simulator": "assetto_corsa",
                 "timestamp_utc": "2026-01-01T00:00:00Z",
                 "physics": {"speed_kmh": 120.0, "rpms": 6400, "gear": 4, "gas": 0.8, "brake": 0.0, "fuel": 20.0, "air_temp_c": 18.0, "road_temp_c": 24.0},
                 "graphics": {"completed_laps": 3, "position": 1, "is_in_pit": False, "surface_grip": 0.99},
@@ -60,8 +63,19 @@ class LlmAndSharedMemoryTests(unittest.TestCase):
 
         result = persist_shared_memory_samples(session_id="test", samples=samples, export_csv=True)
         self.assertEqual(result["sample_count"], 1)
+        self.assertEqual(result["simulator"], "assetto_corsa")
         self.assertTrue(Path(result["json_path"]).exists())
         self.assertTrue(Path(result["csv_path"]).exists())
+
+    def test_list_supported_telemetry_simulators(self) -> None:
+        result = list_supported_telemetry_simulators()
+        self.assertIn("assetto_corsa", result["supported"])
+        self.assertIn("iracing", result["supported"])
+
+    def test_get_telemetry_capabilities_for_iracing(self) -> None:
+        result = get_telemetry_capabilities("iracing")
+        self.assertEqual(result["simulator"], "iracing")
+        self.assertTrue(result["replay_control"])
 
     def test_read_shared_memory_log_returns_temperature_fields(self) -> None:
         samples = [
@@ -88,10 +102,44 @@ class LlmAndSharedMemoryTests(unittest.TestCase):
         result = read_shared_memory_log(path=persisted["json_path"], max_samples=1)
 
         self.assertTrue(result["ok"])
+        self.assertEqual(result["simulator"], "assetto_corsa")
         self.assertEqual(result["returned_samples"], 1)
         self.assertIn("air_temp_c", result["available_fields"]["physics"])
         self.assertIn("road_temp_c", result["available_fields"]["physics"])
         self.assertIn("tyre_core_temp_c", result["available_fields"]["physics"])
+
+    def test_read_shared_memory_log_unions_available_fields_across_session(self) -> None:
+        samples = [
+            {
+                "timestamp_utc": "2026-01-01T00:00:00Z",
+                "physics": {
+                    "speed_kmh": 120.0,
+                    "rpms": 6400,
+                    "gear": 4,
+                },
+                "graphics": {"completed_laps": 3},
+                "static": {"car_model": "ks_porsche_911_gt3", "track": "spa"},
+            },
+            {
+                "timestamp_utc": "2026-01-01T00:00:01Z",
+                "physics": {
+                    "speed_kmh": 121.0,
+                    "tyre_core_temp_c": [78.0, 79.0, 81.0, 82.0],
+                    "air_temp_c": 18.0,
+                },
+                "graphics": {"completed_laps": 3, "surface_grip": 0.99},
+                "static": {"car_model": "ks_porsche_911_gt3", "track": "spa"},
+            },
+        ]
+
+        persisted = persist_shared_memory_samples(session_id="read_union_test", samples=samples, export_csv=False)
+        result = read_shared_memory_log(path=persisted["json_path"], max_samples=1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["returned_samples"], 1)
+        self.assertIn("tyre_core_temp_c", result["available_fields"]["physics"])
+        self.assertIn("air_temp_c", result["available_fields"]["physics"])
+        self.assertIn("surface_grip", result["available_fields"]["graphics"])
 
     @patch("ac_mcp.telemetry_shared_memory.time.sleep", return_value=None)
     @patch("ac_mcp.telemetry_shared_memory.capture_shared_memory_snapshot")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,16 @@ _KNOWN_CORNER_PROFILES: dict[str, list[dict[str, float | str]]] = {
         {"name": "Roma", "start_pct": 90.0, "end_pct": 97.0},
     ],
 }
+
+_MAX_REASONABLE_WHEEL_SLIP = 10.0
+_MIN_REASONABLE_TYRE_PRESSURE = 5.0
+_MAX_REASONABLE_TYRE_PRESSURE = 60.0
+_MIN_REASONABLE_TYRE_TEMP_C = -20.0
+_MAX_REASONABLE_TYRE_TEMP_C = 200.0
+_MIN_REASONABLE_TYRE_WEAR = 0.0
+_MAX_REASONABLE_TYRE_WEAR = 100.0
+_MIN_REASONABLE_SUSPENSION_TRAVEL = 0.0
+_MAX_REASONABLE_SUSPENSION_TRAVEL = 0.5
 
 
 def _shared_memory_root() -> Path:
@@ -154,6 +165,353 @@ def _safe_sequence_max(value: Any) -> float:
             return 0.0
         return max(_safe_float(item) for item in value)
     return _safe_float(value)
+
+
+def _filtered_sequence_values(value: Any, max_abs: float | None = None) -> list[float]:
+    if isinstance(value, (list, tuple)):
+        raw_values = [_safe_float(item) for item in value]
+    else:
+        raw_values = [_safe_float(value)]
+
+    filtered: list[float] = []
+    for item in raw_values:
+        if not math.isfinite(item):
+            continue
+        if max_abs is not None and abs(item) > max_abs:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def _safe_wheel_slip_avg(value: Any) -> float:
+    filtered = _filtered_sequence_values(value, max_abs=_MAX_REASONABLE_WHEEL_SLIP)
+    if not filtered:
+        return 0.0
+    return sum(filtered) / len(filtered)
+
+
+def _safe_wheel_slip_max(value: Any) -> float:
+    filtered = _filtered_sequence_values(value, max_abs=_MAX_REASONABLE_WHEEL_SLIP)
+    if not filtered:
+        return 0.0
+    return max(filtered)
+
+
+def _safe_bounded_sequence_avg(value: Any, minimum: float, maximum: float) -> float:
+    filtered = _filtered_sequence_values(value)
+    bounded = [item for item in filtered if minimum <= item <= maximum]
+    if not bounded:
+        return 0.0
+    return sum(bounded) / len(bounded)
+
+
+def _safe_bounded_sequence_max(value: Any, minimum: float, maximum: float) -> float:
+    filtered = _filtered_sequence_values(value)
+    bounded = [item for item in filtered if minimum <= item <= maximum]
+    if not bounded:
+        return 0.0
+    return max(bounded)
+
+
+def _series_summary(values: list[float], digits: int = 3) -> dict[str, Any]:
+    if not values:
+        return {
+            "samples": 0,
+            "min": None,
+            "max": None,
+            "avg": None,
+            "start": None,
+            "end": None,
+            "delta": None,
+        }
+
+    start = float(values[0])
+    end = float(values[-1])
+    avg = sum(values) / len(values)
+    return {
+        "samples": len(values),
+        "min": round(min(values), digits),
+        "max": round(max(values), digits),
+        "avg": round(avg, digits),
+        "start": round(start, digits),
+        "end": round(end, digits),
+        "delta": round(end - start, digits),
+    }
+
+
+def _extract_wheel_values(
+    physics: dict[str, Any],
+    keys: list[str],
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> list[float]:
+    for key in keys:
+        raw = physics.get(key)
+        if isinstance(raw, (list, tuple)):
+            values = _filtered_sequence_values(raw)
+            if minimum is not None:
+                values = [item for item in values if item >= minimum]
+            if maximum is not None:
+                values = [item for item in values if item <= maximum]
+            if values:
+                return values
+    return []
+
+
+def _append_tyre_group_entry(target: dict[str, Any], sample: dict[str, Any]) -> None:
+    physics = sample.get("physics", {}) if isinstance(sample, dict) else {}
+    if not isinstance(physics, dict):
+        physics = {}
+
+    temps = _extract_wheel_values(
+        physics,
+        ["tyre_core_temp_c"],
+        minimum=_MIN_REASONABLE_TYRE_TEMP_C,
+        maximum=_MAX_REASONABLE_TYRE_TEMP_C,
+    )
+    pressures = _extract_wheel_values(
+        physics,
+        ["tyre_pressure", "wheel_pressure"],
+        minimum=_MIN_REASONABLE_TYRE_PRESSURE,
+        maximum=_MAX_REASONABLE_TYRE_PRESSURE,
+    )
+    wear = _extract_wheel_values(
+        physics,
+        ["tyre_wear"],
+        minimum=_MIN_REASONABLE_TYRE_WEAR,
+        maximum=_MAX_REASONABLE_TYRE_WEAR,
+    )
+    tyre_labels = ("lf", "rf", "lr", "rr")
+
+    target["sample_count"] = int(target.get("sample_count", 0)) + 1
+    for index, label in enumerate(tyre_labels):
+        if index < len(temps):
+            target["temperature_c"][label].append(temps[index])
+        if index < len(pressures):
+            target["pressure"][label].append(pressures[index])
+        if index < len(wear):
+            target["wear"][label].append(wear[index])
+
+
+def _compact_tyre_trends(samples: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    tyre_labels = ("lf", "rf", "lr", "rr")
+    by_sector_raw: dict[int, dict[str, Any]] = {}
+    by_lap_raw: dict[int, dict[str, Any]] = {}
+
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+
+        graphics = sample.get("graphics", {})
+        if not isinstance(graphics, dict):
+            graphics = {}
+
+        sector_index = _safe_int(graphics.get("current_sector_index", -1))
+        if sector_index >= 0:
+            sector_bucket = by_sector_raw.setdefault(
+                sector_index,
+                {
+                    "group_key": sector_index,
+                    "sample_count": 0,
+                    "temperature_c": {label: [] for label in tyre_labels},
+                    "pressure": {label: [] for label in tyre_labels},
+                    "wear": {label: [] for label in tyre_labels},
+                },
+            )
+            _append_tyre_group_entry(sector_bucket, sample)
+
+        lap_number = _safe_int(graphics.get("completed_laps", -1))
+        if lap_number >= 0:
+            lap_bucket = by_lap_raw.setdefault(
+                lap_number,
+                {
+                    "group_key": lap_number,
+                    "sample_count": 0,
+                    "temperature_c": {label: [] for label in tyre_labels},
+                    "pressure": {label: [] for label in tyre_labels},
+                    "wear": {label: [] for label in tyre_labels},
+                },
+            )
+            _append_tyre_group_entry(lap_bucket, sample)
+
+    def _finalize_group(raw: dict[str, Any], *, label_key: str, label_value: int, number_key: str, number_value: int) -> dict[str, Any]:
+        return {
+            label_key: label_value,
+            number_key: number_value,
+            "sample_count": int(raw.get("sample_count", 0)),
+            "temperature_c": {
+                "avg_all_tyres": _series_summary(
+                    [value for values in raw["temperature_c"].values() for value in values],
+                    4,
+                ),
+                "by_tyre": {tyre: _series_summary(values, 4) for tyre, values in raw["temperature_c"].items()},
+            },
+            "pressure": {
+                "by_tyre": {tyre: _series_summary(values, 3) for tyre, values in raw["pressure"].items()},
+            },
+            "wear": {
+                "avg_all_tyres": _series_summary(
+                    [value for values in raw["wear"].values() for value in values],
+                    5,
+                ),
+                "by_tyre": {tyre: _series_summary(values, 5) for tyre, values in raw["wear"].items()},
+            },
+        }
+
+    by_sector = [
+        _finalize_group(raw, label_key="sector_index", label_value=sector_index, number_key="sector_number", number_value=sector_index + 1)
+        for sector_index, raw in sorted(by_sector_raw.items())
+    ]
+    by_lap = [
+        _finalize_group(raw, label_key="completed_laps", label_value=lap_number, number_key="lap_number", number_value=lap_number + 1)
+        for lap_number, raw in sorted(by_lap_raw.items())
+    ]
+
+    return {
+        "by_sector": by_sector,
+        "by_lap": by_lap,
+    }
+
+
+def _build_session_overview(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    scalar_metrics: dict[str, tuple[int, list[float]]] = {
+        "speed_kmh": (3, []),
+        "rpms": (0, []),
+        "gear": (0, []),
+        "gas": (4, []),
+        "brake": (4, []),
+        "fuel": (3, []),
+        "steer_angle_abs": (4, []),
+        "tc": (4, []),
+        "abs": (4, []),
+        "avg_wheel_slip": (5, []),
+        "max_wheel_slip": (5, []),
+        "avg_suspension_travel": (6, []),
+        "avg_tyre_temp_c": (4, []),
+        "avg_tyre_wear": (5, []),
+        "air_temp_c": (3, []),
+        "road_temp_c": (3, []),
+        "number_of_tyres_out": (0, []),
+        "normalized_car_position": (6, []),
+        "distance_traveled": (3, []),
+        "completed_laps": (0, []),
+        "current_sector_index": (0, []),
+    }
+    tyre_labels = ("lf", "rf", "lr", "rr")
+    tyre_temp_series: dict[str, list[float]] = {label: [] for label in tyre_labels}
+    tyre_pressure_series: dict[str, list[float]] = {label: [] for label in tyre_labels}
+    tyre_wear_series: dict[str, list[float]] = {label: [] for label in tyre_labels}
+    timestamps: list[str] = []
+    tyre_trends = _compact_tyre_trends(samples)
+
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+
+        timestamp = str(sample.get("timestamp_utc", "") or "")
+        if timestamp:
+            timestamps.append(timestamp)
+
+        physics = sample.get("physics", {})
+        graphics = sample.get("graphics", {})
+        if not isinstance(physics, dict):
+            physics = {}
+        if not isinstance(graphics, dict):
+            graphics = {}
+
+        metric_map = {
+            "speed_kmh": _safe_float(physics.get("speed_kmh", 0.0)),
+            "rpms": float(_safe_int(physics.get("rpms", 0))),
+            "gear": float(_safe_int(physics.get("gear", 0))),
+            "gas": _safe_float(physics.get("gas", 0.0)),
+            "brake": _safe_float(physics.get("brake", 0.0)),
+            "fuel": _safe_float(physics.get("fuel", 0.0)),
+            "steer_angle_abs": abs(_safe_float(physics.get("steer_angle", 0.0))),
+            "tc": _safe_float(physics.get("tc", 0.0)),
+            "abs": _safe_float(physics.get("abs", 0.0)),
+            "avg_wheel_slip": _safe_wheel_slip_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0))),
+            "max_wheel_slip": _safe_wheel_slip_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0))),
+            "avg_suspension_travel": _safe_bounded_sequence_avg(
+                physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0)),
+                minimum=_MIN_REASONABLE_SUSPENSION_TRAVEL,
+                maximum=_MAX_REASONABLE_SUSPENSION_TRAVEL,
+            ),
+            "avg_tyre_temp_c": _safe_bounded_sequence_avg(
+                physics.get("tyre_core_temp_c", physics.get("avg_tyre_temp_c", 0.0)),
+                minimum=_MIN_REASONABLE_TYRE_TEMP_C,
+                maximum=_MAX_REASONABLE_TYRE_TEMP_C,
+            ),
+            "avg_tyre_wear": _safe_bounded_sequence_avg(
+                physics.get("tyre_wear", physics.get("avg_tyre_wear", 0.0)),
+                minimum=_MIN_REASONABLE_TYRE_WEAR,
+                maximum=_MAX_REASONABLE_TYRE_WEAR,
+            ),
+            "air_temp_c": _safe_float(physics.get("air_temp_c", 0.0)),
+            "road_temp_c": _safe_float(physics.get("road_temp_c", 0.0)),
+            "number_of_tyres_out": float(_safe_int(physics.get("number_of_tyres_out", 0))),
+            "normalized_car_position": _safe_float(graphics.get("normalized_car_position", 0.0)),
+            "distance_traveled": _safe_float(graphics.get("distance_traveled", 0.0)),
+            "completed_laps": float(_safe_int(graphics.get("completed_laps", 0))),
+            "current_sector_index": float(_safe_int(graphics.get("current_sector_index", 0))),
+        }
+
+        for name, value in metric_map.items():
+            scalar_metrics[name][1].append(value)
+
+        tyre_temp_values = _extract_wheel_values(
+            physics,
+            ["tyre_core_temp_c"],
+            minimum=_MIN_REASONABLE_TYRE_TEMP_C,
+            maximum=_MAX_REASONABLE_TYRE_TEMP_C,
+        )
+        tyre_pressure_values = _extract_wheel_values(
+            physics,
+            ["tyre_pressure", "wheel_pressure"],
+            minimum=_MIN_REASONABLE_TYRE_PRESSURE,
+            maximum=_MAX_REASONABLE_TYRE_PRESSURE,
+        )
+        tyre_wear_values = _extract_wheel_values(
+            physics,
+            ["tyre_wear"],
+            minimum=_MIN_REASONABLE_TYRE_WEAR,
+            maximum=_MAX_REASONABLE_TYRE_WEAR,
+        )
+
+        for index, label in enumerate(tyre_labels):
+            if index < len(tyre_temp_values):
+                tyre_temp_series[label].append(tyre_temp_values[index])
+            if index < len(tyre_pressure_values):
+                tyre_pressure_series[label].append(tyre_pressure_values[index])
+            if index < len(tyre_wear_values):
+                tyre_wear_series[label].append(tyre_wear_values[index])
+
+    metrics = {
+        name: _series_summary(values, digits)
+        for name, (digits, values) in scalar_metrics.items()
+    }
+
+    return {
+        "sample_count": len(samples),
+        "timestamp_range": {
+            "start_utc": timestamps[0] if timestamps else "",
+            "end_utc": timestamps[-1] if timestamps else "",
+        },
+        "metrics": metrics,
+        "tyres": {
+            "temperature_c": {
+                "avg_all_tyres": metrics["avg_tyre_temp_c"],
+                "by_tyre": {label: _series_summary(values, 4) for label, values in tyre_temp_series.items()},
+            },
+            "pressure": {
+                "by_tyre": {label: _series_summary(values, 3) for label, values in tyre_pressure_series.items()},
+            },
+            "wear": {
+                "avg_all_tyres": metrics["avg_tyre_wear"],
+                "by_tyre": {label: _series_summary(values, 5) for label, values in tyre_wear_series.items()},
+            },
+            "trends": tyre_trends,
+        },
+    }
 
 
 def _load_corner_profile_rows(raw_rows: Any) -> list[dict[str, Any]]:
@@ -741,10 +1099,12 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
         steer = abs(_safe_float(physics.get("steer_angle", 0.0)))
         tc_setting = _safe_float(physics.get("tc", 0.0))
         abs_setting = _safe_float(physics.get("abs", 0.0))
-        wheel_slip_avg = _safe_sequence_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
-        wheel_slip_max = _safe_sequence_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0)))
-        suspension_avg = _safe_sequence_avg(
-            physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0))
+        wheel_slip_avg = _safe_wheel_slip_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
+        wheel_slip_max = _safe_wheel_slip_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0)))
+        suspension_avg = _safe_bounded_sequence_avg(
+            physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0)),
+            minimum=_MIN_REASONABLE_SUSPENSION_TRAVEL,
+            maximum=_MAX_REASONABLE_SUSPENSION_TRAVEL,
         )
 
         bucket = buckets[bucket_index]
@@ -788,6 +1148,7 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
 
     lap_start = completed_laps[0] if completed_laps else 0
     lap_end = completed_laps[-1] if completed_laps else 0
+    session_overview = _build_session_overview(samples)
 
     return {
         "ok": True,
@@ -804,6 +1165,7 @@ def analyze_shared_memory_track_map(path: str = "", bins: int = 40) -> dict[str,
         "lap_start": lap_start,
         "lap_end": lap_end,
         "sectors_seen": sectors,
+        "session_overview": session_overview,
         "profile": profile,
         "hotspots": {
             "heavy_braking": heavy_braking,
@@ -895,13 +1257,23 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
         steer = abs(_safe_float(physics.get("steer_angle", 0.0)))
         tc_setting = _safe_float(physics.get("tc", 0.0))
         abs_setting = _safe_float(physics.get("abs", 0.0))
-        wheel_slip_avg = _safe_sequence_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
-        wheel_slip_max = _safe_sequence_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0)))
-        suspension_avg = _safe_sequence_avg(
-            physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0))
+        wheel_slip_avg = _safe_wheel_slip_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
+        wheel_slip_max = _safe_wheel_slip_max(physics.get("wheel_slip", physics.get("max_wheel_slip", 0.0)))
+        suspension_avg = _safe_bounded_sequence_avg(
+            physics.get("suspension_travel", physics.get("avg_suspension_travel", 0.0)),
+            minimum=_MIN_REASONABLE_SUSPENSION_TRAVEL,
+            maximum=_MAX_REASONABLE_SUSPENSION_TRAVEL,
         )
-        tyre_temp_avg = _safe_sequence_avg(physics.get("tyre_core_temp_c", physics.get("avg_tyre_temp_c", 0.0)))
-        tyre_wear_avg = _safe_sequence_avg(physics.get("tyre_wear", physics.get("avg_tyre_wear", 0.0)))
+        tyre_temp_avg = _safe_bounded_sequence_avg(
+            physics.get("tyre_core_temp_c", physics.get("avg_tyre_temp_c", 0.0)),
+            minimum=_MIN_REASONABLE_TYRE_TEMP_C,
+            maximum=_MAX_REASONABLE_TYRE_TEMP_C,
+        )
+        tyre_wear_avg = _safe_bounded_sequence_avg(
+            physics.get("tyre_wear", physics.get("avg_tyre_wear", 0.0)),
+            minimum=_MIN_REASONABLE_TYRE_WEAR,
+            maximum=_MAX_REASONABLE_TYRE_WEAR,
+        )
 
         tyres_out_raw = physics.get("number_of_tyres_out")
         if tyres_out_raw is None:
@@ -1041,6 +1413,7 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
     total_severe_over = sum(int(corner.get("severe_over_limit_count", 0)) for corner in corners)
 
     tyres_out_available = max(0, mapped_sample_count - missing_tyres_out_count)
+    session_overview = _build_session_overview(samples)
 
     return {
         "ok": True,
@@ -1057,6 +1430,7 @@ def analyze_shared_memory_corner_limits(path: str = "", bins: int = 120) -> dict
         "profile_source": profile_source,
         "profile_corner_count": len(profile),
         "bins": bucket_count,
+        "session_overview": session_overview,
         "summary": {
             "under_limit_samples": total_under,
             "on_limit_samples": total_on,
@@ -1134,6 +1508,7 @@ def coach_shared_memory_corner_limits(path: str = "", bins: int = 120, top_n: in
         "mapped_sample_count": analysis.get("mapped_sample_count", 0),
         "top_n": requested_top_n,
         "overall_risk_score": overall_risk,
+        "session_overview": analysis.get("session_overview", {}),
         "priorities": priorities,
         "summary": analysis.get("summary", {}),
         "high_risk_corners": analysis.get("high_risk_corners", []),
@@ -1181,7 +1556,7 @@ def _summarize_sectors(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
         speed = _safe_float(physics.get("speed_kmh", 0.0))
         brake = _safe_float(physics.get("brake", 0.0))
         gas = _safe_float(physics.get("gas", 0.0))
-        slip = _safe_sequence_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
+        slip = _safe_wheel_slip_avg(physics.get("wheel_slip", physics.get("avg_wheel_slip", 0.0)))
         sector_time_ms = _safe_int(graphics.get("last_sector_time", 0))
 
         bucket["count"] += 1
@@ -1370,15 +1745,32 @@ def _evaluate_objective(
             "source": "proxy",
         }
 
-    return _evaluate_objective(
-        objective="lap_time",
-        base_lap_time_ms=base_lap_time_ms,
-        candidate_lap_time_ms=candidate_lap_time_ms,
-        base_sectors=base_sectors,
-        candidate_sectors=candidate_sectors,
-        base_corners=base_corners,
-        candidate_corners=candidate_corners,
-    )
+    # Fallback: cualquier objetivo desconocido cae a lap_time (sin recursión)
+    if base_lap_time_ms is not None and candidate_lap_time_ms is not None:
+        delta = float(candidate_lap_time_ms - base_lap_time_ms)
+        return {
+            "objective": "lap_time",
+            "metric": "lap_time_ms",
+            "base_value": base_lap_time_ms,
+            "candidate_value": candidate_lap_time_ms,
+            "delta": round(delta, 3),
+            "lower_is_better": True,
+            "winner": _winner(delta, lower_is_better=True),
+            "source": "timing",
+        }
+    
+    # Si no hay lap times, retornar error
+    return {
+        "objective": "unknown",
+        "metric": "none",
+        "base_value": 0,
+        "candidate_value": 0,
+        "delta": 0,
+        "lower_is_better": True,
+        "winner": "unknown",
+        "source": "error",
+        "error": f"Cannot evaluate objective '{objective}' - no data available",
+    }
 
 
 def compare_shared_memory_stints(
@@ -1549,6 +1941,8 @@ def compare_shared_memory_stints(
         "track": track,
         "car_model": car_model,
         "objective": objective_result,
+        "base_session_overview": base_corner_analysis.get("session_overview", {}),
+        "candidate_session_overview": candidate_corner_analysis.get("session_overview", {}),
         "lap_time": {
             "base_ms": base_lap_time_ms,
             "candidate_ms": candidate_lap_time_ms,

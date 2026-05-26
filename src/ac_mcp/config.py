@@ -52,6 +52,39 @@ def session_log_root() -> Path:
     return root
 
 
+def replay_root() -> Path:
+    configured = os.getenv("AC_REPLAY_ROOT", "").strip()
+    if configured:
+        return Path(configured).resolve()
+
+    local_default = Path("replays").resolve()
+    if local_default.exists():
+        return local_default
+
+    home = Path.home()
+    one_drive = os.getenv("OneDrive", "").strip()
+
+    candidates: list[Path] = [
+        home / "Documents" / "Assetto Corsa" / "replay",
+        home / "Documentos" / "Assetto Corsa" / "replay",
+    ]
+
+    if one_drive:
+        one_drive_path = Path(one_drive)
+        candidates.extend(
+            [
+                one_drive_path / "Documents" / "Assetto Corsa" / "replay",
+                one_drive_path / "Documentos" / "Assetto Corsa" / "replay",
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    return local_default
+
+
 def _clean_env(name: str, default: str = "") -> str:
     value = os.getenv(name, default)
     if value is None:
@@ -104,6 +137,24 @@ def tavily_api_key() -> str:
     return _clean_env("TAVILY_API_KEY", "")
 
 
+def normalize_simulator_name(name: str) -> str:
+    raw = str(name or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"", "default", "auto"}:
+        return "assetto_corsa"
+    if raw in {"assetto_corsa", "assetto", "ac"}:
+        return "assetto_corsa"
+    if raw in {"iracing", "i_racing", "ir"}:
+        return "iracing"
+    raise ValueError(
+        "Unsupported simulator. Use one of: assetto_corsa, ac, iracing."
+    )
+
+
+def telemetry_simulator(default: str = "assetto_corsa") -> str:
+    configured = _clean_env("AC_TELEMETRY_SIMULATOR", default)
+    return normalize_simulator_name(configured)
+
+
 def resolve_setup_path(path: str) -> Path:
     root = setup_root()
     raw = Path(path)
@@ -112,5 +163,17 @@ def resolve_setup_path(path: str) -> Path:
 
     if resolved != root and root not in resolved.parents:
         raise ValueError("Path is outside of AC_SETUP_ROOT")
+
+    return resolved
+
+
+def resolve_replay_path(path: str) -> Path:
+    root = replay_root()
+    raw = Path(path)
+    candidate = raw if raw.is_absolute() else (root / raw)
+    resolved = candidate.resolve()
+
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("Path is outside of AC_REPLAY_ROOT")
 
     return resolved
